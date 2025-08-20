@@ -1,9 +1,3 @@
----
-title: "VaR_QQQ_AAPL"
-author: "Keyuan Tina Cao"
-date: "2025-07-31"
-output: html_document
----
 
 ```{r}
 library(quantmod)
