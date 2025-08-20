@@ -1,0 +1,131 @@
+---
+title: "VaR_QQQ_AAPL"
+author: "Keyuan Tina Cao"
+date: "2025-07-31"
+output: html_document
+---
+
+```{r}
+library(quantmod)
+library(rugarch)
+library(dplyr)
+library(tibble)
+library(tidyr)
+
+
+start_date <- as.Date("2024-07-01")
+end_date   <- as.Date("2025-07-29")
+
+getSymbols("AAPL", from = start_date, to = end_date, src = "yahoo")
+getSymbols("QQQ",  from = start_date, to = end_date, src = "yahoo")
+
+## Log return
+apple_df <- data.frame(
+  Date = index(AAPL),
+  Adjusted = as.numeric(Ad(AAPL)) 
+)
+
+qqq_df <- data.frame(
+  Date = index(QQQ),
+  Adjusted = as.numeric(Ad(QQQ))
+)
+
+get_return <- function(df) {
+  df %>%
+    arrange(Date) %>%
+    mutate(
+      log_price = log(Adjusted),
+      Return = 100 * (log_price - lag(log_price))
+    ) %>%
+    drop_na() %>%
+    select(Date, Adjusted, Return)
+}
+
+apple_df <- get_return(apple_df)
+qqq_df   <- get_return(qqq_df)
+
+## GARCH + EGARCH with normal distribution + Student t 
+make_spec <- function(model_type = "sGARCH", dist = "norm") {
+  ugarchspec(
+    variance.model = list(model = model_type, garchOrder = c(1,1)),
+    mean.model     = list(armaOrder = c(1,1), include.mean = TRUE),
+    distribution.model = dist
+  )
+}
+
+model_types <- c("sGARCH", "eGARCH")  
+dists <- c("norm", "std")            
+assets <- list(Apple = apple_df$Return, QQQ = qqq_df$Return)
+
+model_fits <- list()
+
+for (asset_name in names(assets)) {
+  returns <- assets[[asset_name]]
+  for (model in model_types) {
+    for (dist in dists) {
+      spec <- make_spec(model, dist)
+      fit <- ugarchfit(spec, data = returns, solver = "hybrid")
+      key <- paste(asset_name, model, dist, sep = "_")
+      model_fits[[key]] <- fit
+    }
+  }
+}
+
+## VaR 95% + 99%
+alpha_levels <- c(0.05, 0.01)
+
+calc_var <- function(fit, alphas = alpha_levels) {
+  sigma_last <- as.numeric(tail(sigma(fit), 1))  
+  dist_type <- fit@model$modeldesc$distribution
+  if (dist_type == "norm") {
+    q_vals <- qnorm(alphas)
+  } else if (dist_type == "std") {
+    shape <- coef(fit)["shape"]
+    q_vals <- qt(alphas, df = shape)
+  }
+  VaRs <- -q_vals * sigma_last
+  names(VaRs) <- paste0("VaR_", 100 * (1 - alphas), "%")
+  return(VaRs)
+}
+
+
+## Table
+var_table <- tibble(
+  Asset_Model = character(),
+  VaR_95 = numeric(),
+  VaR_99 = numeric()
+)
+
+for (key in names(model_fits)) {
+  fit <- model_fits[[key]]
+  var_vals <- calc_var(fit)
+  var_table <- var_table %>%
+    add_row(
+      Asset_Model = key,
+      VaR_95 = var_vals[1],
+      VaR_99 = var_vals[2]
+    )
+}
+
+var_table <- var_table %>%
+  separate(Asset_Model, into = c("Asset", "Model", "Dist"), sep = "_") %>%
+  relocate(Asset, Model, Dist) %>%
+  mutate(across(c(VaR_95, VaR_99), ~ round(.x, 4))) 
+
+print(var_table)
+
+```
+
+
+The table above presents the one-day Value-at-Risk (VaR) estimates at the 95% and 99% confidence levels for two assets, Apple and QQQ, based on four different model specifications: GARCH(1,1) and EGARCH(1,1), each under both the normal and Student’s t error distribution assumptions. Several important observations can be drawn from these results.
+
+First, across both assets, the VaR estimates obtained under the Student’s t distribution are consistently higher than those derived from the normal distribution, particularly at the 99% confidence level. This is a well-documented consequence of the heavier tails of the t-distribution, which better accommodates the extreme events often observed in financial return series. 
+
+Second, a comparison between GARCH and EGARCH models reveals that the EGARCH models tend to yield slightly higher VaR estimates under both distributional assumptions. This is especially true for Apple, where the EGARCH-t model reports a 99% VaR of 5.12 versus 5.85 in the GARCH-t case. The difference, though moderate, highlights EGARCH’s ability to capture asymmetric volatility effects, which are known to be prevalent in equity markets. 
+
+Third, a cross-asset comparison shows that Apple exhibits significantly higher VaR than QQQ across all model configurations. This is consistent with expectations, as Apple represents an individual large-cap technology stock, while QQQ is a diversified ETF. The lower volatility and risk profile of QQQ, driven by its diversified exposure, naturally translates into lower VaR values.
+
+In conclusion, these results affirm that both the choice of volatility model and distributional assumption significantly impact the magnitude of VaR estimates. The t-distribution consistently provides more conservative and larger risk estimates due to its ability to model fat tails. EGARCH models, while yielding slightly higher VaR figures, offer additional advantages in modeling volatility asymmetry. 
+
+
+
